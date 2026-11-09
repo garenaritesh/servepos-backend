@@ -1,0 +1,8 @@
+{
+  "appId": "com.servepos.restaurant",
+  "appName": "ServePOS",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false
+  }
+}
