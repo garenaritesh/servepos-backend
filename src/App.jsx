@@ -124,15 +124,36 @@ export default function App() {
 
   const cloudRequest = async (payload) => {
     if (!syncToken.trim()) throw new Error('Enter the sync token in Settings first.')
-    const response = await fetch('/api/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${syncToken.trim()}` },
-      body: JSON.stringify({ ...payload, deviceId, syncType: payload.syncType || 'manual' })
-    })
-    const result = await response.json().catch(() => ({}))
+    // Use the deployed Vercel API origin explicitly: Capacitor's app origin is
+    // localhost, so a relative /api/sync URL does not reach the cloud backend.
+    const apiUrl = 'https://servepos-backend.vercel.app/api/sync'
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Device is offline. Changes remain saved locally and will sync when internet returns.')
+    }
+    let response
+    try {
+      response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${syncToken.trim()}` },
+        body: JSON.stringify({ ...payload, deviceId, syncType: payload.syncType || 'manual' })
+      })
+    } catch {
+      throw new Error('Cannot reach ServePOS cloud. Check internet; changes remain saved locally.')
+    }
+    const contentType = response.headers.get('content-type') || ''
+    if (!contentType.includes('application/json')) {
+      throw new Error('Cloud API returned a non-JSON response. Check the Vercel API deployment.')
+    }
+    const result = await response.json()
     if (!response.ok) {
       if (response.status === 409) throw new Error(`Cloud revision conflict. Cloud is at revision ${result.revision}. Download cloud data after making a local backup.`)
       throw new Error(result.error || `Sync failed (${response.status})`)
+    }
+    if (payload.action === 'save' && !Number.isFinite(Number(result.revision))) {
+      throw new Error('Cloud API response is missing a valid revision. Data was not marked as synced.')
+    }
+    if (payload.action === 'get' && (!Number.isFinite(Number(result.revision)) || !result.data || typeof result.data !== 'object')) {
+      throw new Error('Cloud API returned incomplete restore data.')
     }
     return result
   }
@@ -201,7 +222,7 @@ export default function App() {
       }
     }, 2500)
     return () => clearTimeout(timer)
-  }, [data, autoSync, localDbReady, localDbError, syncToken, networkRetryTick])
+  }, [data, autoSync, localDbReady, localDbError, syncToken, cloudRevision, networkRetryTick])
 
   const notify = msg => setToast(msg)
   const update = patch => setData(d => ({ ...d, ...patch }))
