@@ -82,6 +82,7 @@ export default function App() {
   const [cloudRevision, setCloudRevision] = useState(() => Number(localStorage.getItem('servepos-cloud-revision') || 0))
   const [cloudStatus, setCloudStatus] = useState('Not synced yet')
   const [cloudBusy, setCloudBusy] = useState(false)
+  const [networkRetryTick, setNetworkRetryTick] = useState(0)
   const [lastSyncAt, setLastSyncAt] = useState(localStorage.getItem('servepos-last-sync') || '')
   const [deviceId] = useState(() => { let id = localStorage.getItem('servepos-device-id'); if (!id) { id = 'device-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now()); localStorage.setItem('servepos-device-id', id) } return id })
 
@@ -158,20 +159,49 @@ export default function App() {
     } catch (error) { setCloudStatus(error.message || 'Download failed'); notify(error.message || 'Cloud download failed') }
     finally { setCloudBusy(false) }
   }
+  // Reconnect-aware auto sync: keep local changes safe while offline and retry on browser online events.
+  useEffect(() => {
+    if (!autoSync || !localDbReady || localDbError || !syncToken.trim()) return
+    const handleOffline = () => setCloudStatus('Offline · changes are saved locally and waiting to sync')
+    const handleOnline = () => {
+      setCloudStatus('Internet restored · preparing automatic sync…')
+      setNetworkRetryTick(value => value + 1)
+    }
+    window.addEventListener('offline', handleOffline)
+    window.addEventListener('online', handleOnline)
+    if (!navigator.onLine) handleOffline()
+    return () => {
+      window.removeEventListener('offline', handleOffline)
+      window.removeEventListener('online', handleOnline)
+    }
+  }, [autoSync, localDbReady, localDbError, syncToken])
+
   useEffect(() => {
     if (!autoSync || !localDbReady || localDbError || !syncToken.trim()) return
     const timer = setTimeout(async () => {
       if (cloudBusy) return
-      setCloudBusy(true); setCloudStatus('Auto sync uploading…')
+      if (!navigator.onLine) {
+        setCloudStatus('Offline · changes are saved locally and waiting to sync')
+        return
+      }
+      setCloudBusy(true)
+      setCloudStatus('Auto sync uploading…')
       try {
         const result = await cloudRequest({ action: 'save', data, expectedRevision: cloudRevision, syncType: 'automatic' })
-        setCloudRevision(result.revision); const stamp = new Date().toISOString(); setLastSyncAt(stamp); localStorage.setItem('servepos-last-sync', stamp)
+        setCloudRevision(result.revision)
+        const stamp = new Date().toISOString()
+        setLastSyncAt(stamp)
+        localStorage.setItem('servepos-last-sync', stamp)
         setCloudStatus(`Auto sync complete · revision ${result.revision}`)
-      } catch (error) { setCloudStatus(error.message || 'Auto sync failed'); if (String(error.message).includes('conflict')) setAutoSync(false) }
-      finally { setCloudBusy(false) }
+      } catch (error) {
+        setCloudStatus(`${error.message || 'Auto sync failed'} · will retry when connection is restored`)
+        if (String(error.message).includes('conflict')) setAutoSync(false)
+      } finally {
+        setCloudBusy(false)
+      }
     }, 2500)
     return () => clearTimeout(timer)
-  }, [data, autoSync, localDbReady, localDbError, syncToken])
+  }, [data, autoSync, localDbReady, localDbError, syncToken, networkRetryTick])
 
   const notify = msg => setToast(msg)
   const update = patch => setData(d => ({ ...d, ...patch }))
