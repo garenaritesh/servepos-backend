@@ -77,6 +77,13 @@ export default function App() {
   const [billPreview, setBillPreview] = useState(null)
   const [localDbReady, setLocalDbReady] = useState(false)
   const [localDbError, setLocalDbError] = useState('')
+  const [syncToken, setSyncToken] = useState(() => localStorage.getItem('servepos-sync-token') || '')
+  const [autoSync, setAutoSync] = useState(() => localStorage.getItem('servepos-auto-sync') === 'true')
+  const [cloudRevision, setCloudRevision] = useState(() => Number(localStorage.getItem('servepos-cloud-revision') || 0))
+  const [cloudStatus, setCloudStatus] = useState('Not synced yet')
+  const [cloudBusy, setCloudBusy] = useState(false)
+  const [lastSyncAt, setLastSyncAt] = useState(localStorage.getItem('servepos-last-sync') || '')
+  const [deviceId] = useState(() => { let id = localStorage.getItem('servepos-device-id'); if (!id) { id = 'device-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now()); localStorage.setItem('servepos-device-id', id) } return id })
 
   // Migrate the current browser data into IndexedDB, then use IndexedDB for ongoing saves.
   useEffect(() => {
@@ -110,6 +117,61 @@ export default function App() {
   }, [data, localDbReady, localDbError])
   useEffect(() => { localStorage.setItem('servepos-l1-users', JSON.stringify(users)) }, [users])
   useEffect(() => { if (toast) { const t = setTimeout(() => setToast(''), 2600); return () => clearTimeout(t) } }, [toast])
+  useEffect(() => { localStorage.setItem('servepos-sync-token', syncToken) }, [syncToken])
+  useEffect(() => { localStorage.setItem('servepos-auto-sync', String(autoSync)) }, [autoSync])
+  useEffect(() => { localStorage.setItem('servepos-cloud-revision', String(cloudRevision)) }, [cloudRevision])
+
+  const cloudRequest = async (payload) => {
+    if (!syncToken.trim()) throw new Error('Enter the sync token in Settings first.')
+    const response = await fetch('/api/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${syncToken.trim()}` },
+      body: JSON.stringify({ ...payload, deviceId, syncType: payload.syncType || 'manual' })
+    })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      if (response.status === 409) throw new Error(`Cloud revision conflict. Cloud is at revision ${result.revision}. Download cloud data after making a local backup.`)
+      throw new Error(result.error || `Sync failed (${response.status})`)
+    }
+    return result
+  }
+  const manualCloudUpload = async () => {
+    if (cloudBusy) return
+    setCloudBusy(true); setCloudStatus('Uploading local data…')
+    try {
+      const result = await cloudRequest({ action: 'save', data, expectedRevision: cloudRevision, syncType: 'manual' })
+      setCloudRevision(result.revision); const stamp = new Date().toISOString(); setLastSyncAt(stamp); localStorage.setItem('servepos-last-sync', stamp)
+      setCloudStatus(`Uploaded successfully · revision ${result.revision}`); notify('Cloud backup uploaded successfully')
+    } catch (error) { setCloudStatus(error.message || 'Upload failed'); notify(error.message || 'Cloud upload failed') }
+    finally { setCloudBusy(false) }
+  }
+  const manualCloudDownload = async () => {
+    if (cloudBusy) return
+    if (!confirm('Download cloud data and replace the current local restaurant data? Export a local backup first.')) return
+    setCloudBusy(true); setCloudStatus('Downloading cloud data…')
+    try {
+      const result = await cloudRequest({ action: 'get' })
+      if (!result.data || typeof result.data !== 'object') throw new Error('Cloud data is empty or invalid.')
+      await writeLocalData(result.data); setData(result.data); setCloudRevision(result.revision)
+      const stamp = new Date().toISOString(); setLastSyncAt(stamp); localStorage.setItem('servepos-last-sync', stamp)
+      setCloudStatus(`Downloaded successfully · revision ${result.revision}`); notify('Cloud data restored to this device')
+    } catch (error) { setCloudStatus(error.message || 'Download failed'); notify(error.message || 'Cloud download failed') }
+    finally { setCloudBusy(false) }
+  }
+  useEffect(() => {
+    if (!autoSync || !localDbReady || localDbError || !syncToken.trim()) return
+    const timer = setTimeout(async () => {
+      if (cloudBusy) return
+      setCloudBusy(true); setCloudStatus('Auto sync uploading…')
+      try {
+        const result = await cloudRequest({ action: 'save', data, expectedRevision: cloudRevision, syncType: 'automatic' })
+        setCloudRevision(result.revision); const stamp = new Date().toISOString(); setLastSyncAt(stamp); localStorage.setItem('servepos-last-sync', stamp)
+        setCloudStatus(`Auto sync complete · revision ${result.revision}`)
+      } catch (error) { setCloudStatus(error.message || 'Auto sync failed'); if (String(error.message).includes('conflict')) setAutoSync(false) }
+      finally { setCloudBusy(false) }
+    }, 2500)
+    return () => clearTimeout(timer)
+  }, [data, autoSync, localDbReady, localDbError, syncToken])
 
   const notify = msg => setToast(msg)
   const update = patch => setData(d => ({ ...d, ...patch }))
@@ -268,7 +330,7 @@ export default function App() {
     <div className="pos-layout">
       <aside className="pos-sidebar"><div className="side-label">CAFE MANAGEMENT</div>{[['Take Order',ShoppingBag],['Overview',LayoutDashboard],['Orders',ClipboardList],['Customers',Users],['Tables',Armchair],['Menu',Utensils],['Inventory',Boxes],['Ingredients',Package],['Expenses',CircleDollarSign],['Reports',BarChart3],['Settings',Settings]].map(([p,I]) => <button key={p} className={page === p ? 'side-link active' : 'side-link'} onClick={() => setPage(p)}><I size={17}/>{p}</button>)}<div className="side-tip"><b>Simple counter workflow</b><p>Take an order, choose payment and complete the sale. No waiter, kitchen or billing-counter steps.</p></div></aside>
       <main className="pos-main">
-        <OwnerView page={page} data={data} orders={orders} todayOrders={todayOrders} todaySales={todaySales} activeDineIn={activeDineIn} setPage={setPage} setModal={setModal} notify={notify} update={update} setWorkspace={switchWorkspace} requestBill={requestBill} patchBatch={patchBatch} markPaid={markPaid} users={users} updateUsers={updateUsers} onCreateOrder={createOrder}/>
+        <OwnerView page={page} data={data} orders={orders} todayOrders={todayOrders} todaySales={todaySales} activeDineIn={activeDineIn} setPage={setPage} setModal={setModal} notify={notify} update={update} setWorkspace={switchWorkspace} requestBill={requestBill} patchBatch={patchBatch} markPaid={markPaid} users={users} updateUsers={updateUsers} onCreateOrder={createOrder} syncToken={syncToken} setSyncToken={setSyncToken} autoSync={autoSync} setAutoSync={setAutoSync} cloudStatus={cloudStatus} cloudBusy={cloudBusy} cloudRevision={cloudRevision} lastSyncAt={lastSyncAt} onCloudUpload={manualCloudUpload} onCloudDownload={manualCloudDownload}/>
       </main>
     </div>
     {modal?.type === 'new' && <OrderModal data={data} initialType={modal.orderType || 'Dine-in'} onClose={() => setModal(null)} onCreate={createOrder}/>}
@@ -317,7 +379,7 @@ function AuthShell({children}) { return <div className="auth-screen"><div classN
 function Heading({eyebrow,title,sub,action}) { return <div className="pos-heading"><div><small>{eyebrow}</small><h1>{title}</h1><p>{sub}</p></div>{action}</div> }
 function Stat({label,value,sub,icon:Icon,tone='blue'}) { return <div className="pos-stat"><div><span>{label}</span><b>{value}</b><small>{sub}</small></div><i className={tone}><Icon size={19}/></i></div> }
 function Status({children}) { return <span className={'pos-status ' + String(children).toLowerCase().replaceAll(' ','-')}>{children}</span> }
-function OwnerView({page,data,orders,todayOrders,todaySales,activeDineIn,setPage,setModal,notify,update,setWorkspace,requestBill,patchBatch,markPaid,users,updateUsers,onCreateOrder}) {
+function OwnerView({page,data,orders,todayOrders,todaySales,activeDineIn,setPage,setModal,notify,update,setWorkspace,requestBill,patchBatch,markPaid,users,updateUsers,onCreateOrder,syncToken,setSyncToken,autoSync,setAutoSync,cloudStatus,cloudBusy,cloudRevision,lastSyncAt,onCloudUpload,onCloudDownload}) {
   const occupied = data.tables.filter(t => t.status === 'Occupied').length
   if (page === 'Take Order') return <QuickOrderView data={data} onCreate={onCreateOrder} notify={notify}/>
   if (page === 'Overview') return <>
@@ -334,7 +396,7 @@ function OwnerView({page,data,orders,todayOrders,todaySales,activeDineIn,setPage
   if (page === 'Customers') return <CustomersOwner data={data} orders={orders}/>
   if (page === 'Expenses') return <ExpensesOwner data={data} update={update} notify={notify}/>
   if (page === 'Reports') return <ReportsOwner orders={orders} data={data}/>
-  return <SettingsOwner data={data} update={update} notify={notify} users={users} updateUsers={updateUsers}/>
+  return <SettingsOwner data={data} update={update} notify={notify} users={users} updateUsers={updateUsers} syncToken={syncToken} setSyncToken={setSyncToken} autoSync={autoSync} setAutoSync={setAutoSync} cloudStatus={cloudStatus} cloudBusy={cloudBusy} cloudRevision={cloudRevision} lastSyncAt={lastSyncAt} onCloudUpload={onCloudUpload} onCloudDownload={onCloudDownload}/>
 }
 function OrderTable({orders}) { return <div className="pos-table-wrap"><table className="pos-table"><thead><tr><th>ORDER / CUSTOMER</th><th>TYPE / PAYMENT</th><th>ITEMS</th><th>TOTAL</th><th>STATUS</th><th>BILL</th></tr></thead><tbody>{orders.length?orders.map(o=><tr><td><b>{o.id}</b><small>{o.customer||'Walk-in customer'} · {o.time}</small></td><td>{o.type==='Counter'?'Counter sale':o.type}<small>{o.paymentMethod||'—'}</small></td><td>{o.items.reduce((s,i)=>s+i.qty,0)} qty</td><td><b>{money(o.total)}</b></td><td><Status>{o.status==='Paid'?'Paid':o.billRequested?'Bill requested':o.status}</Status></td><td>{o.billRequested?'Requested':o.status==='Paid'?'Paid':'—'}</td></tr>):<tr><td colSpan="6" className="pos-empty">No orders recorded yet.</td></tr>}</tbody></table></div> }
 function WaiterView({data,orders,setModal,addItems,requestBill,patchBatch}) { const [filter,setFilter]=useState('Active');const list=orders.filter(o=>o.type==='Dine-in'&&o.status!=='Paid'&&(filter==='All'||(filter==='Active'&&!o.billRequested)||(filter==='Bills'&&o.billRequested)));return <><Heading eyebrow="SERVICE TEAM" title="Waiter station" sub="Open a table, take orders, add items and request the final bill." action={<button className="pos-primary" onClick={()=>setModal({type:'new',orderType:'Dine-in'})}><Plus size={17}/> Take table order</button>}/><div className="pos-role-banner waiter"><ConciergeBell size={21}/><span><b>Waiter workspace</b><small>New orders and additional items are sent to the kitchen as separate KOT tickets.</small></span></div><div className="pos-tabs">{['Active','Bills','All'].map(x=><button className={filter===x?'selected':''} onClick={()=>setFilter(x)}>{x}</button>)}</div><div className="pos-order-cards">{list.map(o=><article className="service-order"><div className="service-order-head"><div><span className="table-chip">{o.tableName}</span><b>{o.id}</b><small>{o.time} · {o.customer||'Dine-in guest'}</small></div><Status>{o.billRequested?'Bill requested':o.status}</Status></div><div className="service-items">{o.items.map(i=><div><span>{i.name}</span><b>× {i.qty}</b></div>)}</div><div className="service-batches"><b>KOT progress</b>{o.batches.map(b=><span>{b.id}: {b.status}{b.status==='Ready'&&<button className="serve-inline" onClick={()=>patchBatch(o.id,b.id,'Served')}>Mark served</button>}</span>)}</div><div className="service-order-foot"><b>{money(o.total)}</b><div><button className="pos-secondary" onClick={()=>setModal({type:'add',order:o})}><Plus size={14}/> Add items</button><button className="pos-primary" onClick={()=>requestBill(o.id)} disabled={o.billRequested||!o.batches.every(b=>b.status==='Served')}><Receipt size={14}/> {o.billRequested?'Bill requested':o.batches.every(b=>b.status==='Served')?'Request final bill':'Serve all items first'}</button></div></div></article>)}</div>{!list.length&&<Empty title="No dine-in orders here" sub="Orders assigned to your tables will appear here."/>}</> }
@@ -590,13 +652,15 @@ function ReportsOwner({orders,data}) {
  <section className="pos-card"><div className="pos-card-head"><div><h3>Best-selling items</h3><p>Quantity, revenue and gross profit by menu item</p></div></div><div className="pos-table-wrap"><table className="pos-table"><thead><tr><th>ITEM</th><th>QTY SOLD</th><th>SALES</th><th>ITEM COST</th><th>GROSS PROFIT</th><th>MARGIN</th></tr></thead><tbody>{best.length?best.map(x=><tr><td><b>{x.name}</b></td><td>{x.qty}</td><td>{money(x.revenue)}</td><td>{money(x.cost)}</td><td className="profit-positive">{money(x.revenue-x.cost)}</td><td>{x.revenue?((x.revenue-x.cost)/x.revenue*100).toFixed(1):'0.0'}%</td></tr>):<tr><td colSpan="6" className="pos-empty">No paid sales in this period yet.</td></tr>}</tbody></table></div></section></>
 }
 
-function SettingsOwner({data,update,notify,users,updateUsers}) {
+function SettingsOwner({data,update,notify,users,updateUsers,syncToken,setSyncToken,autoSync,setAutoSync,cloudStatus,cloudBusy,cloudRevision,lastSyncAt,onCloudUpload,onCloudDownload}) {
  const r=data.restaurant||{}
  const set=(key,value)=>update({restaurant:{...r,[key]:value}})
  return <><Heading eyebrow="SYSTEM SETTINGS" title="Restaurant & invoice settings" sub="These details appear on printed customer bills. Configure the tax rate only after confirming your applicable tax treatment."/>
  <section className="pos-card settings-card"><h3>Restaurant identity</h3><div className="logo-upload-row"><div className="restaurant-logo-preview">{r.logo?<img src={r.logo} alt="Restaurant logo"/>:<span>LOGO</span>}</div><label className="pos-field">Restaurant logo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>{const file=e.target.files?.[0];if(!file)return;if(file.size>1024*1024){notify('Logo must be 1 MB or smaller');e.target.value='';return}const reader=new FileReader();reader.onload=()=>set('logo',reader.result);reader.readAsDataURL(file)}}/></label>{r.logo&&<button className="pos-secondary" onClick={()=>set('logo','')}>Remove logo</button>}</div><div className="pos-form-grid"><label className="pos-field">Restaurant name<input value={r.name||''} onChange={e=>set('name',e.target.value)}/></label><label className="pos-field">Phone number<input value={r.phone||''} onChange={e=>set('phone',e.target.value)} placeholder="Restaurant contact"/></label><label className="pos-field">GSTIN (optional)<input value={r.gstin||''} onChange={e=>set('gstin',e.target.value)} placeholder="15-character GSTIN"/></label><label className="pos-field">UPI ID / VPA<input value={r.upiId||''} onChange={e=>set('upiId',e.target.value)} placeholder="restaurant@upi"/></label><label className="pos-field">Invoice prefix<input value={r.invoicePrefix||'INV'} onChange={e=>set('invoicePrefix',e.target.value)}/></label><label className="pos-field">Tax rate (%)<input type="number" min="0" max="100" step="0.01" value={r.taxRate??0} onChange={e=>set('taxRate',Number(e.target.value)||0)}/></label><label className="pos-field">Restaurant address<input value={r.address||''} onChange={e=>set('address',e.target.value)} placeholder="Address printed on invoice"/></label></div><p className="modal-help">Tax is set to 0% by default. Confirm the correct GST rate, service classification and invoice requirements with your accountant before issuing tax invoices. This app does not determine tax eligibility automatically.</p></section>
 
  <section className="pos-card settings-card"><h3>Customer bill printing</h3><label className="bill-print-setting"><span><b>Automatically print a customer bill after every completed order</b><small>When ON, ServePOS opens the print dialog immediately after an order is saved. When OFF, orders are saved normally without automatically printing a bill.</small></span><input type="checkbox" checked={Boolean(r.autoPrintBill)} onChange={e=>set('autoPrintBill',e.target.checked)}/></label><p className="modal-help">The device must have a configured printer. If the browser or device blocks pop-ups, allow print pop-ups for ServePOS.</p></section>
+
+ <section className="pos-card settings-card"><h3>Cloud sync · Pilot test</h3><p className="modal-help">Connect this test cafe to its own Neon database through your Vercel backend. Local data remains the primary copy. Save a local backup before restoring cloud data.</p><label className="pos-field">Vercel sync token<input type="password" value={syncToken} onChange={e=>setSyncToken(e.target.value)} placeholder="Paste SERVEPOS_SYNC_TOKEN" autoComplete="new-password"/></label><div className="row-actions"><button className="pos-primary" disabled={cloudBusy||!syncToken.trim()} onClick={onCloudUpload}> {cloudBusy?'Please wait…':'Upload local data to cloud'}</button><button className="pos-secondary" disabled={cloudBusy||!syncToken.trim()} onClick={onCloudDownload}>Download / restore cloud data</button></div><label className="bill-print-setting" style={{marginTop:14}}><span><b>Automatic cloud sync</b><small>When enabled, local changes upload after a short pause while internet is available. It does not automatically download or overwrite local data.</small></span><input type="checkbox" checked={autoSync} onChange={e=>setAutoSync(e.target.checked)} disabled={!syncToken.trim()}/></label><div className="cloud-sync-meta"><b>Sync status:</b> {cloudStatus}<br/><b>Cloud revision:</b> {cloudRevision}<br/><b>Last sync:</b> {lastSyncAt ? new Date(lastSyncAt).toLocaleString() : 'Never'}</div><p className="system-warning">Pilot-only security note: the current shared-token API is suitable only for your controlled test device. Do not distribute this build to customers or put the token in a public APK. Production customer sync needs individual server-side authentication.</p></section>
 
  <section className="pos-card settings-card"><h3>Data & local backup</h3><button className="pos-secondary" onClick={()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify({...data,accounts:users,backupVersion:2,exportedAt:new Date().toISOString()},null,2)],{type:'application/json'}));a.download='servepos-backup.json';a.click();URL.revokeObjectURL(a.href)}}>Export backup JSON</button><label className="pos-secondary" style={{display:'inline-flex',marginLeft:8,cursor:'pointer'}}>Restore backup JSON<input type="file" accept="application/json,.json" style={{display:'none'}} onChange={e=>{const file=e.target.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{try{const backup=JSON.parse(reader.result);if(!backup.restaurant||!Array.isArray(backup.menu)||!Array.isArray(backup.orders))throw new Error('Invalid backup');if(!confirm('Restore this backup? Current restaurant data will be replaced.'))return;const {accounts,...rest}=backup;update({...clone(seedData),...rest,customers:rest.customers||[],expenses:rest.expenses||[],ingredients:rest.ingredients||[]});if(Array.isArray(accounts)&&accounts.length)updateUsers(accounts);notify('Backup restored successfully')}catch{notify('Could not restore: invalid backup file')}finally{e.target.value=''}};reader.readAsText(file)}}/></label><p className="system-warning">ServePOS stores this cafe data in this browser on this device. Export backups regularly. Cloud database and multi-device sync are not active in this test build.</p><button className="pos-secondary" onClick={()=>{if(confirm('Clear all menu items, tables, orders and staff accounts? Your owner login and restaurant name will remain.')){update({...clone(seedData),restaurant:{...seedData.restaurant,name:r.name}});updateUsers(users.filter(u=>u.role==='Owner'));notify('Restaurant records cleared')}}}>Clear restaurant records</button></section></>
 }

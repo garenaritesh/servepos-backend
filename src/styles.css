@@ -248,3 +248,7 @@
 .password-visibility{position:absolute;right:5px;top:50%;transform:translateY(-50%);width:34px;height:34px;border:0;border-radius:7px;background:transparent;color:#71809a;display:grid;place-items:center;cursor:pointer;padding:0}
 .password-visibility:active{background:#eef2ff;color:#4f6fe8}
 .password-visibility svg{pointer-events:none}
+
+/* Cloud sync pilot status */
+.cloud-sync-meta{margin-top:14px;padding:12px 14px;border:1px solid #e6ebf2;border-radius:10px;background:#f8fafc;color:#526176;font-size:11px;line-height:1.9;overflow-wrap:anywhere}
+.cloud-sync-meta b{color:#26364c}
